@@ -12,13 +12,119 @@ open System.Windows.Data
 open System.Windows.Input
 open System.Windows.Media
 
+type UnitType =
+    | Unit of string * int 
+    | CompositeUnit of UnitType list     
+    override this.ToString() =
+        let exponent = function
+            | Unit(_,n) -> n
+            | CompositeUnit(_) ->                
+                raise (new System.InvalidOperationException())
+        let rec toString = function        
+            | Unit(s,n) when n=0 -> ""
+            | Unit(s,n) when n=1 -> s
+            | Unit(s,n)          -> s + " ^ " + n.ToString()            
+            | CompositeUnit(us) ->               
+                let ps, ns =
+                    us |> List.partition (fun u -> exponent u >= 0)
+                let join xs = 
+                    let s = xs |> List.map toString |> List.toArray             
+                    System.String.Join(" ",s)
+                match ps,ns with
+                | ps, [] -> join ps
+                | ps, ns ->
+                    let ns = ns |> List.map UnitType.Reciprocal
+                    join ps + " / " + join ns
+        match this with
+        | Unit(_,n) when n < 0 -> " / " + toString this
+        | _ -> toString this    
+    static member ( * ) (v:ValueType,u:UnitType) = UnitValue(v,u)    
+    static member ( * ) (lhs:UnitType,rhs:UnitType) =
+        let text = function
+            | Unit(s,n) -> s
+            | CompositeUnit(us) -> us.ToString()
+        let normalize us u =
+            let t = text u
+            match us |> List.tryFind (fun x -> text x = t), u with
+            | Some(Unit(s,n) as v), Unit(_,n') ->
+                us |> List.map (fun x -> if x = v then Unit(s,n+n') else x)                 
+            | Some(_), _ -> raise (new System.NotImplementedException())
+            | None, _ -> us@[u]
+        let normalize' us us' =
+            us' |> List.fold (fun (acc) x -> normalize acc x) us
+        match lhs,rhs with
+        | Unit(u1,p1), Unit(u2,p2) when u1 = u2 ->
+            Unit(u1,p1+p2)       
+        | Unit("",p1), _ -> rhs
+        | _, Unit("",p2) -> lhs 
+        | Unit(u1,p1), Unit(u2,p2) ->            
+            CompositeUnit([lhs;rhs])
+        | CompositeUnit(us), Unit(_,_) ->
+            CompositeUnit(normalize us rhs)
+        | Unit(_,_), CompositeUnit(us) ->
+            CompositeUnit(normalize' [lhs]  us)
+        | CompositeUnit(us), CompositeUnit(us') ->
+            CompositeUnit(normalize' us us')
+        | _,_ -> raise (new System.NotImplementedException())
+    static member Reciprocal x =
+        let rec reciprocal = function
+            | Unit(s,n) -> Unit(s,-n)
+            | CompositeUnit(us) -> CompositeUnit(us |> List.map reciprocal)
+        reciprocal x
+    static member ( / ) (lhs:UnitType,rhs:UnitType) =        
+        lhs * (UnitType.Reciprocal rhs)
+    static member ( + ) (lhs:UnitType,rhs:UnitType) =       
+        if lhs = rhs then lhs                
+        else raise (new System.InvalidOperationException())
+and ValueType = decimal
+and UnitValue(v:ValueType,u:UnitType) = 
+    member this.Value = v 
+    member this.Unit = u
+    override this.ToString() = sprintf "%O %O" v u
+    static member (~-) (v:UnitValue) =
+        UnitValue(-v.Value,v.Unit)
+    static member (+) (lhs:UnitValue,rhs:UnitValue) =
+        UnitValue(lhs.Value+rhs.Value, lhs.Unit+rhs.Unit)         
+    static member (-) (lhs:UnitValue,rhs:UnitValue) =
+        UnitValue(lhs.Value-rhs.Value, lhs.Unit+rhs.Unit) 
+    static member (*) (lhs:UnitValue,rhs:UnitValue) =                    
+        UnitValue(lhs.Value*rhs.Value,lhs.Unit*rhs.Unit)                
+    static member (*) (lhs:UnitValue,rhs:ValueType) =        
+        UnitValue(lhs.Value*rhs,lhs.Unit)      
+    static member (*) (v:UnitValue,u:UnitType) = 
+        UnitValue(v.Value,v.Unit*u)  
+    static member (/) (lhs:UnitValue,rhs:UnitValue) =                    
+        UnitValue(lhs.Value/rhs.Value,lhs.Unit/rhs.Unit)
+    static member (/) (lhs:UnitValue,rhs:ValueType) =
+        UnitValue(lhs.Value/rhs,lhs.Unit)  
+    static member (/) (v:UnitValue,u:UnitType) =
+        UnitValue(v.Value,v.Unit/u)
+    override this.Equals(that) =
+        let that = that :?> UnitValue
+        this.Unit = that.Unit && this.Value = that.Value
+    override this.GetHashCode() = 
+        System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(this)
+    interface System.IComparable with
+        member this.CompareTo(that) =
+            let that = that :?> UnitValue
+            if this.Unit = that.Unit then
+                if this.Value < that.Value then -1
+                elif this.Value > that.Value then 1
+                else 0
+            else invalidOp "Unit mismatch"
+
+module Unit =
+    let Empty = Unit("",0)
+    let Create s = Unit(s,1)
+    let ValueOf(v,u) = UnitValue(v, Create(u))
+
 type token =
     | WhiteSpace
     | Symbol of char
     | OpToken of string
     | RefToken of int * int
     | StrToken of string
-    | NumToken of decimal 
+    | NumToken of string
 
 let (|Match|_|) pattern input =
     let m = System.Text.RegularExpressions.Regex.Match(input, pattern)
@@ -31,12 +137,12 @@ let rec toRef (s:string) =
 
 let matchToken = function
     | Match @"^\s+" s -> s, WhiteSpace
-    | Match @"^\+|^\-|^\*|^\/"  s -> s, OpToken s
+    | Match @"^\+|^\-|^\*|^\/|^\^"  s -> s, OpToken s
     | Match @"^=|^<>|^<=|^>=|^>|^<"  s -> s, OpToken s   
     | Match @"^\(|^\)|^\,|^\:" s -> s, Symbol s.[0]   
     | Match @"^[A-Z]\d+" s -> s, s |> toRef |> RefToken
     | Match @"^[A-Za-z]+" s -> s, StrToken s
-    | Match @"^\d+(\.\d+)?|\.\d+" s -> s, s |> decimal |> NumToken
+    | Match @"^\d+(\.\d+)?|\.\d+" s -> s, s |> NumToken
     | _ -> invalidOp ""
 
 let tokenize s =
@@ -55,13 +161,13 @@ type formula =
     | Neg of formula
     | ArithmeticOp of formula * arithmeticOp * formula
     | LogicalOp of formula * logicalOp * formula
-    | Num of decimal
+    | Num of UnitValue
     | Ref of int * int
     | Range of int * int * int * int
     | Fun of string * formula list
 
 let rec (|Term|_|) = function
-    | Sum(f1, (OpToken(LogicOp op))::Sum(f2,t)) -> Some(LogicalOp(f1,op,f2),t)
+    | Sum(f1, OpToken(LogicOp op)::Sum(f2,t)) -> Some(LogicalOp(f1,op,f2),t)
     | Sum(f1,t) -> Some (f1,t)
     | _ -> None
 and (|LogicOp|_|) = function
@@ -88,13 +194,29 @@ and (|Factor|_|) = function
 and (|ProductOp|_|) = function
     | OpToken "*" -> Some Mul | OpToken "/" -> Some Div
     | _ -> None
-and (|Atom|_|) = function      
-    | NumToken n::t -> Some(Num n, t)
-    | RefToken(x1,y1)::(Symbol ':'::RefToken(x2,y2)::t) -> 
+and (|Atom|_|) = function
+    | NumToken n::Units(u,t) -> Some(Num(u * decimal n),t)
+    | NumToken n::t -> Some(Num(UnitValue(decimal n,Unit.Empty)), t)
+    | RefToken(x1,y1)::Symbol ':'::RefToken(x2,y2)::t -> 
         Some(Range(min x1 x2,min y1 y2,max x1 x2,max y1 y2),t)  
     | RefToken(x,y)::t -> Some(Ref(x,y), t)
     | Symbol '('::Term(f, Symbol ')'::t) -> Some(f, t)
     | StrToken s::Tuple(ps, t) -> Some(Fun(s,ps),t)  
+    | Units(u,t) -> Some(Num(u),t)    
+    | _ -> None
+and (|Units|_|) = function
+    | Unit'(u,t) ->
+        let rec aux u1 =  function
+            | OpToken "/"::Unit'(u2,t) -> aux (u1 / u2) t
+            | Unit'(u2,t) -> aux (u1 * u2) t
+            | t -> Some(u1,t)
+        aux u t
+    | _ -> None
+and (|Unit'|_|) = function
+    | StrToken u::OpToken "^"::NumToken p::t -> 
+        Some(UnitValue(1.0M,Unit(u,int p)),t)
+    | StrToken u::t ->
+        Some(Unit.ValueOf(1.0M,u), t)
     | _ -> None
 and (|Tuple|_|) = function
     | Symbol '('::Params(ps, Symbol ')'::t) -> Some(ps, t)  
@@ -116,14 +238,17 @@ let evaluate valueAt formula =
     let rec eval = function
         | Neg f -> - (eval f)
         | ArithmeticOp(f1,op,f2) -> arithmetic op (eval f1) (eval f2)
-        | LogicalOp(f1,op,f2) -> if logic op (eval f1) (eval f2) then 0.0M else -1.0M
+        | LogicalOp(f1,op,f2) -> 
+            if logic op (eval f1) (eval f2) 
+            then UnitValue(0.0M,Unit.Empty) 
+            else UnitValue(-1.0M,Unit.Empty)
         | Num d -> d
-        | Ref(x,y) -> valueAt(x,y) |> decimal
-        | Range _ -> invalidOp "Expected in function"
-        | Fun("SUM",ps) -> ps |> evalAll |> List.sum
+        | Ref(x,y) -> valueAt(x,y)
+        | Range _ -> invalidOp "Range expected in function"
+        | Fun("SUM",ps) -> ps |> evalAll |> List.reduce (+)
         | Fun("IF",[condition;f1;f2]) -> 
-            if (eval condition)=0.0M then eval f1 else eval f2 
-        | Fun(_,_) -> failwith "Unknown function"
+            if (eval condition).Value=0.0M then eval f1 else eval f2 
+        | Fun(_,_) -> failwith "Unknown function"        
     and arithmetic = function
         | Add -> (+) | Sub -> (-) | Mul -> (*) | Div -> (/)
     and logic = function         
@@ -133,7 +258,7 @@ let evaluate valueAt formula =
     and evalAll ps =
         ps |> List.collect (function            
             | Range(x1,y1,x2,y2) ->
-                [for x=x1 to x2 do for y=y1 to y2 do yield valueAt(x,y) |> decimal]
+                [for x=x1 to x2 do for y=y1 to y2 do yield valueAt(x,y)]
             | x -> [eval x]            
         )
     eval formula
@@ -162,6 +287,7 @@ and Row (index,colCount,sheet) =
 and Cell (sheet:Sheet) as cell =
     inherit ObservableObject()
     let mutable value = ""
+    let mutable unitValue = UnitValue(0.0M,Unit("",0))
     let mutable data = ""       
     let mutable formula : formula option = None
     let updated = Event<_>()
@@ -170,21 +296,22 @@ and Cell (sheet:Sheet) as cell =
         let (row : Row) = Array.get sheet.Rows y
         let (cell : Cell) = Array.get row.Cells x
         cell
-    let valueAt address = (cellAt address).Value
+    let valueAt address = (cellAt address).UnitValue
     let eval formula =         
-        try (evaluate valueAt formula).ToString()       
-        with _ -> "N/A"
+        try let v = evaluate valueAt formula in v, v.ToString()
+        with _ -> UnitValue(0.0M,Unit("",0)), "N/A"
     let parseFormula (text:string) =
         if text.StartsWith "="
         then                
             try true, parse (text.Substring 1) |> Some
             with _ -> true, None
         else false, None
-    let update newValue generation =
-        if newValue <> value then
-            value <- newValue
+    let update (newUnitValue, newValue) generation =
+        if newValue <> value || newUnitValue <> unitValue then
+            value <- newValue  
+            unitValue <- newUnitValue         
             updated.Trigger generation
-            cell.Notify "Value"
+            cell.Notify "Value"          
     let unsubscribe () =
         subscriptions |> List.iter (fun d -> d.Dispose())
         subscriptions <- []
@@ -210,10 +337,11 @@ and Cell (sheet:Sheet) as cell =
             let newValue =
                 match isFormula, formula with           
                 | _, Some f -> eval f
-                | true, _ -> "N/A"
-                | _, None -> text
+                | true, _ -> UnitValue(0.0M,Unit.Empty), "N/A"
+                | _, None -> UnitValue(0.0M,Unit.Empty), text
             update newValue 0
     member cell.Value = value
+    member cell.UnitValue = unitValue
     member cell.Updated = updated.Publish
 and ObservableObject() =
     let propertyChanged = 
@@ -235,7 +363,7 @@ type DataGrid(headings:seq<_>, items:IEnumerable, cellFactory:int*int->Framework
         Grid(Background=SolidColorBrush Colors.Gray) +. header
     do  ColumnDefinition(Width=GridLength(24.0)) |> grid.ColumnDefinitions.Add 
     do  headings |> Seq.iteri (fun i heading ->
-        let width = GridLength(64.0)
+        let width = GridLength(128.0)
         ColumnDefinition(Width=width) |> grid.ColumnDefinitions.Add       
         let header = createHeader heading HorizontalAlignment.Center
         grid.Children.Add header |> ignore
