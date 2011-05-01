@@ -18,8 +18,7 @@ type UnitType =
     override this.ToString() =
         let exponent = function
             | Unit(_,n) -> n
-            | CompositeUnit(_) ->                
-                raise (new System.InvalidOperationException())
+            | CompositeUnit(_) -> invalidOp ""
         let rec toString = function        
             | Unit(s,n) when n=0 -> ""
             | Unit(s,n) when n=1 -> s
@@ -48,7 +47,7 @@ type UnitType =
             match us |> List.tryFind (fun x -> text x = t), u with
             | Some(Unit(s,n) as v), Unit(_,n') ->
                 us |> List.map (fun x -> if x = v then Unit(s,n+n') else x)                 
-            | Some(_), _ -> raise (new System.NotImplementedException())
+            | Some(_), _ -> raise (new NotImplementedException())
             | None, _ -> us@[u]
         let normalize' us us' =
             us' |> List.fold (fun (acc) x -> normalize acc x) us
@@ -65,7 +64,7 @@ type UnitType =
             CompositeUnit(normalize' [lhs]  us)
         | CompositeUnit(us), CompositeUnit(us') ->
             CompositeUnit(normalize' us us')
-        | _,_ -> raise (new System.NotImplementedException())
+        | _,_ -> raise (new NotImplementedException())
     static member Reciprocal x =
         let rec reciprocal = function
             | Unit(s,n) -> Unit(s,-n)
@@ -75,7 +74,7 @@ type UnitType =
         lhs * (UnitType.Reciprocal rhs)
     static member ( + ) (lhs:UnitType,rhs:UnitType) =       
         if lhs = rhs then lhs                
-        else raise (new System.InvalidOperationException())
+        else invalidOp "Unit mismatch"
 and ValueType = decimal
 and UnitValue(v:ValueType,u:UnitType) = 
     member this.Value = v 
@@ -194,15 +193,18 @@ and (|Factor|_|) = function
 and (|ProductOp|_|) = function
     | OpToken "*" -> Some Mul | OpToken "/" -> Some Div
     | _ -> None
-and (|Atom|_|) = function
-    | NumToken n::Units(u,t) -> Some(Num(u * decimal n),t)
-    | NumToken n::t -> Some(Num(UnitValue(decimal n,Unit.Empty)), t)
+and (|Atom|_|) = function    
     | RefToken(x1,y1)::Symbol ':'::RefToken(x2,y2)::t -> 
         Some(Range(min x1 x2,min y1 y2,max x1 x2,max y1 y2),t)  
     | RefToken(x,y)::t -> Some(Ref(x,y), t)
     | Symbol '('::Term(f, Symbol ')'::t) -> Some(f, t)
     | StrToken s::Tuple(ps, t) -> Some(Fun(s,ps),t)  
-    | Units(u,t) -> Some(Num(u),t)    
+    | Number(n,t) -> Some(n,t)
+    | Units(u,t) -> Some(Num u,t)  
+    | _ -> None
+and (|Number|_|) = function
+    | NumToken n::Units(u,t) -> Some(Num(u * decimal n),t)
+    | NumToken n::t -> Some(Num(UnitValue(decimal n,Unit.Empty)), t)      
     | _ -> None
 and (|Units|_|) = function
     | Unit'(u,t) ->
@@ -337,8 +339,11 @@ and Cell (sheet:Sheet) as cell =
             let newValue =
                 match isFormula, formula with           
                 | _, Some f -> eval f
-                | true, _ -> UnitValue(0.0M,Unit.Empty), "N/A"
-                | _, None -> UnitValue(0.0M,Unit.Empty), text
+                | true, _ -> UnitValue(0.0M,Unit.Empty), "N/A"                 
+                | _, None -> 
+                    match (try tokenize text with _ -> []) with
+                    | Number (Num u,[]) -> u, text
+                    | _ -> UnitValue(0.0M,Unit.Empty), text
             update newValue 0
     member cell.Value = value
     member cell.UnitValue = unitValue
