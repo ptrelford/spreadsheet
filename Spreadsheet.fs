@@ -54,8 +54,8 @@ type UnitType =
         match lhs,rhs with
         | Unit(u1,p1), Unit(u2,p2) when u1 = u2 ->
             Unit(u1,p1+p2)       
-        | Unit("",p1), _ -> rhs
-        | _, Unit("",p2) -> lhs 
+        | Unit("",_), _ -> rhs
+        | _, Unit("",_) -> lhs 
         | Unit(u1,p1), Unit(u2,p2) ->            
             CompositeUnit([lhs;rhs])
         | CompositeUnit(us), Unit(_,_) ->
@@ -74,7 +74,7 @@ type UnitType =
         lhs * (UnitType.Reciprocal rhs)
     static member ( + ) (lhs:UnitType,rhs:UnitType) =       
         if lhs = rhs then lhs                
-        else invalidOp "Unit mismatch"
+        else invalidOp "Unit mismatch"   
 and ValueType = decimal
 and UnitValue(v:ValueType,u:UnitType) = 
     member this.Value = v 
@@ -98,6 +98,22 @@ and UnitValue(v:ValueType,u:UnitType) =
         UnitValue(lhs.Value/rhs,lhs.Unit)  
     static member (/) (v:UnitValue,u:UnitType) =
         UnitValue(v.Value,v.Unit/u)
+    static member Pow (lhs:UnitValue,rhs:UnitValue) =
+        let isInt x = 0.0M = x - (x |> int |> decimal)
+        match lhs.Unit, rhs.Unit with
+        | Unit("",_), Unit("",_) -> 
+            let x = (float lhs.Value) ** (float rhs.Value)           
+            UnitValue(decimal x,Unit("",0))
+        | _, Unit("",_) when isInt rhs.Value ->
+            pown lhs (int rhs.Value)
+        | Unit(s,p1), Unit("",_) when isInt (decimal p1*rhs.Value) ->
+            let x = (float lhs.Value) ** (float rhs.Value)
+            UnitValue(x |> decimal, Unit(s,int (decimal p1*rhs.Value)))       
+        | CompositeUnit us, Unit("",_) when us |> List.forall (function (Unit(_,p)) -> isInt (decimal p*rhs.Value) | _ -> false) -> 
+            let x = (float lhs.Value) ** (float rhs.Value)
+            UnitValue(x |> decimal, CompositeUnit(us |> List.map (function (Unit(s,p)) -> Unit(s, int (decimal p * rhs.Value)) | _ -> invalidOp "" )))
+        | _ -> invalidOp "Unit mismatch"
+    static member One = UnitValue(1.0M,Unit("",0)) 
     override this.Equals(that) =
         let that = that :?> UnitValue
         this.Unit = that.Unit && this.Value = that.Value
@@ -158,6 +174,7 @@ type arithmeticOp = Add | Sub | Mul | Div
 type logicalOp = Eq | Lt | Gt | Le | Ge | Ne
 type formula =
     | Neg of formula
+    | Exp of formula * formula
     | ArithmeticOp of formula * arithmeticOp * formula
     | LogicalOp of formula * logicalOp * formula
     | Num of UnitValue
@@ -175,14 +192,18 @@ and (|LogicOp|_|) = function
     | "<=" -> Some Le | ">=" -> Some Ge
     | _ -> None
 and (|Sum|_|) = function
-    | Factor(f1, t) ->      
+    | Exponent(f1, t) ->      
         let rec aux f1 = function        
-            | SumOp op::Factor(f2, t) -> aux (ArithmeticOp(f1,op,f2)) t               
+            | SumOp op::Exponent(f2, t) -> aux (ArithmeticOp(f1,op,f2)) t               
             | t -> Some(f1, t)      
         aux f1 t  
     | _ -> None
 and (|SumOp|_|) = function 
     | OpToken "+" -> Some Add | OpToken "-" -> Some Sub 
+    | _ -> None
+and (|Exponent|_|) = function
+    | Factor(b, OpToken "^"::Exponent(e,t)) -> Some(Exp(b,e),t)
+    | Factor(f,t) -> Some (f,t)
     | _ -> None
 and (|Factor|_|) = function  
     | OpToken "-"::Factor(f, t) -> Some(Neg f, t)
@@ -214,9 +235,13 @@ and (|Units|_|) = function
             | t -> Some(u1,t)
         aux u t
     | _ -> None
-and (|Unit'|_|) = function
-    | StrToken u::OpToken "^"::NumToken p::t -> 
-        Some(UnitValue(1.0M,Unit(u,int p)),t)
+and (|Int|_|) s = 
+    match Int32.TryParse(s) with
+    | true, n -> Some n
+    | false,_ -> None
+and (|Unit'|_|) = function    
+    | StrToken u::OpToken "^"::NumToken(Int p)::t -> 
+        Some(UnitValue(1.0M,Unit(u,p)),t)
     | StrToken u::t ->
         Some(Unit.ValueOf(1.0M,u), t)
     | _ -> None
@@ -239,6 +264,7 @@ let parse s =
 let evaluate valueAt formula =
     let rec eval = function
         | Neg f -> - (eval f)
+        | Exp(b,e) -> (eval b) ** (eval e)
         | ArithmeticOp(f1,op,f2) -> arithmetic op (eval f1) (eval f2)
         | LogicalOp(f1,op,f2) -> 
             if logic op (eval f1) (eval f2) 
@@ -247,6 +273,7 @@ let evaluate valueAt formula =
         | Num d -> d
         | Ref(x,y) -> valueAt(x,y)
         | Range _ -> invalidOp "Range expected in function"
+        | Fun("SQRT", [Num x]) -> x ** UnitValue(0.5M,Unit("",0))
         | Fun("SUM",ps) -> ps |> evalAll |> List.reduce (+)
         | Fun("IF",[condition;f1;f2]) -> 
             if (eval condition).Value=0.0M then eval f1 else eval f2 
@@ -342,7 +369,7 @@ and Cell (sheet:Sheet) as cell =
                 | true, _ -> UnitValue(0.0M,Unit.Empty), "N/A"                 
                 | _, None -> 
                     match (try tokenize text with _ -> []) with
-                    | Number (Num u,[]) -> u, text
+                    | Number (Num u,[]) -> u, u.ToString()
                     | _ -> UnitValue(0.0M,Unit.Empty), text
             update newValue 0
     member cell.Value = value
