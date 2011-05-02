@@ -12,14 +12,19 @@ open System.Windows.Data
 open System.Windows.Input
 open System.Windows.Media
 
-type UnitType =
+type UnitType = 
+    | Empty
     | Unit of string * int 
     | CompositeUnit of UnitType list     
+    static member Create(s,n) =
+        if n = 0 then Empty else Unit(s,n)
     override this.ToString() =
         let exponent = function
+            | Empty -> 0
             | Unit(_,n) -> n
             | CompositeUnit(_) -> invalidOp ""
         let rec toString = function        
+            | Empty -> ""
             | Unit(s,n) when n=0 -> ""
             | Unit(s,n) when n=1 -> s
             | Unit(s,n)          -> s + " ^ " + n.ToString()            
@@ -38,24 +43,25 @@ type UnitType =
         | Unit(_,n) when n < 0 -> " / " + toString this
         | _ -> toString this    
     static member ( * ) (v:ValueType,u:UnitType) = UnitValue(v,u)    
-    static member ( * ) (lhs:UnitType,rhs:UnitType) =
+    static member ( * ) (lhs:UnitType,rhs:UnitType) =       
         let text = function
+            | Empty -> ""                 
             | Unit(s,n) -> s
             | CompositeUnit(us) -> us.ToString()
         let normalize us u =
             let t = text u
             match us |> List.tryFind (fun x -> text x = t), u with
             | Some(Unit(s,n) as v), Unit(_,n') ->
-                us |> List.map (fun x -> if x = v then Unit(s,n+n') else x)                 
+                us |> List.map (fun x -> if x = v then UnitType.Create(s,n+n') else x)                 
             | Some(_), _ -> raise (new NotImplementedException())
             | None, _ -> us@[u]
         let normalize' us us' =
             us' |> List.fold (fun (acc) x -> normalize acc x) us
         match lhs,rhs with
         | Unit(u1,p1), Unit(u2,p2) when u1 = u2 ->
-            Unit(u1,p1+p2)       
-        | Unit("",_), _ -> rhs
-        | _, Unit("",_) -> lhs 
+            UnitType.Create(u1,p1+p2)
+        | Empty, _ -> rhs
+        | _, Empty -> lhs 
         | Unit(u1,p1), Unit(u2,p2) ->            
             CompositeUnit([lhs;rhs])
         | CompositeUnit(us), Unit(_,_) ->
@@ -67,6 +73,7 @@ type UnitType =
         | _,_ -> raise (new NotImplementedException())
     static member Reciprocal x =
         let rec reciprocal = function
+            | Empty -> Empty
             | Unit(s,n) -> Unit(s,-n)
             | CompositeUnit(us) -> CompositeUnit(us |> List.map reciprocal)
         reciprocal x
@@ -76,8 +83,10 @@ type UnitType =
         if lhs = rhs then lhs                
         else invalidOp "Unit mismatch"   
 and ValueType = decimal
-and UnitValue(v:ValueType,u:UnitType) = 
-    member this.Value = v 
+and UnitValue (v:ValueType,u:UnitType) =
+    new(v:ValueType) = UnitValue(v,Empty)
+    new(v:ValueType,s:string) = UnitValue(v,Unit(s,1))
+    member this.Value = v
     member this.Unit = u
     override this.ToString() = sprintf "%O %O" v u
     static member (~-) (v:UnitValue) =
@@ -101,24 +110,23 @@ and UnitValue(v:ValueType,u:UnitType) =
     static member Pow (lhs:UnitValue,rhs:UnitValue) =
         let isInt x = 0.0M = x - (x |> int |> decimal)
         match lhs.Unit, rhs.Unit with
-        | Unit("",_), Unit("",_) -> 
+        | Empty, Empty -> 
             let x = (float lhs.Value) ** (float rhs.Value)           
-            UnitValue(decimal x,Unit("",0))
-        | _, Unit("",_) when isInt rhs.Value ->
+            UnitValue(decimal x)
+        | _, Empty when isInt rhs.Value ->
             pown lhs (int rhs.Value)
-        | Unit(s,p1), Unit("",_) when isInt (decimal p1*rhs.Value) ->
+        | Unit(s,p1), Empty when isInt (decimal p1*rhs.Value) ->
             let x = (float lhs.Value) ** (float rhs.Value)
             UnitValue(x |> decimal, Unit(s,int (decimal p1*rhs.Value)))       
-        | CompositeUnit us, Unit("",_) when us |> List.forall (function (Unit(_,p)) -> isInt (decimal p*rhs.Value) | _ -> false) -> 
+        | CompositeUnit us, Empty when us |> List.forall (function (Unit(_,p)) -> isInt (decimal p*rhs.Value) | _ -> false) -> 
             let x = (float lhs.Value) ** (float rhs.Value)
             UnitValue(x |> decimal, CompositeUnit(us |> List.map (function (Unit(s,p)) -> Unit(s, int (decimal p * rhs.Value)) | _ -> invalidOp "" )))
         | _ -> invalidOp "Unit mismatch"
-    static member One = UnitValue(1.0M,Unit("",0)) 
+    static member One = UnitValue(1.0M,Empty) 
     override this.Equals(that) =
         let that = that :?> UnitValue
         this.Unit = that.Unit && this.Value = that.Value
-    override this.GetHashCode() = 
-        System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(this)
+    override this.GetHashCode() = hash this 
     interface System.IComparable with
         member this.CompareTo(that) =
             let that = that :?> UnitValue
@@ -127,11 +135,6 @@ and UnitValue(v:ValueType,u:UnitType) =
                 elif this.Value > that.Value then 1
                 else 0
             else invalidOp "Unit mismatch"
-
-module Unit =
-    let Empty = Unit("",0)
-    let Create s = Unit(s,1)
-    let ValueOf(v,u) = UnitValue(v, Create(u))
 
 type token =
     | WhiteSpace
@@ -225,7 +228,7 @@ and (|Atom|_|) = function
     | _ -> None
 and (|Number|_|) = function
     | NumToken n::Units(u,t) -> Some(Num(u * decimal n),t)
-    | NumToken n::t -> Some(Num(UnitValue(decimal n,Unit.Empty)), t)      
+    | NumToken n::t -> Some(Num(UnitValue(decimal n)), t)      
     | _ -> None
 and (|Units|_|) = function
     | Unit'(u,t) ->
@@ -241,9 +244,9 @@ and (|Int|_|) s =
     | false,_ -> None
 and (|Unit'|_|) = function    
     | StrToken u::OpToken "^"::NumToken(Int p)::t -> 
-        Some(UnitValue(1.0M,Unit(u,p)),t)
+        Some(UnitValue(1.0M,UnitType.Create(u,p)),t)
     | StrToken u::t ->
-        Some(Unit.ValueOf(1.0M,u), t)
+        Some(UnitValue(1.0M,u), t)
     | _ -> None
 and (|Tuple|_|) = function
     | Symbol '('::Params(ps, Symbol ')'::t) -> Some(ps, t)  
@@ -268,12 +271,12 @@ let evaluate valueAt formula =
         | ArithmeticOp(f1,op,f2) -> arithmetic op (eval f1) (eval f2)
         | LogicalOp(f1,op,f2) -> 
             if logic op (eval f1) (eval f2) 
-            then UnitValue(0.0M,Unit.Empty) 
-            else UnitValue(-1.0M,Unit.Empty)
+            then UnitValue(0.0M) 
+            else UnitValue(-1.0M)
         | Num d -> d
         | Ref(x,y) -> valueAt(x,y)
         | Range _ -> invalidOp "Range expected in function"
-        | Fun("SQRT", [Num x]) -> x ** UnitValue(0.5M,Unit("",0))
+        | Fun("SQRT",[x]) -> eval x ** UnitValue(0.5M)
         | Fun("SUM",ps) -> ps |> evalAll |> List.reduce (+)
         | Fun("IF",[condition;f1;f2]) -> 
             if (eval condition).Value=0.0M then eval f1 else eval f2 
@@ -316,7 +319,7 @@ and Row (index,colCount,sheet) =
 and Cell (sheet:Sheet) as cell =
     inherit ObservableObject()
     let mutable value = ""
-    let mutable unitValue = UnitValue(0.0M,Unit("",0))
+    let mutable unitValue = UnitValue(0.0M)
     let mutable data = ""       
     let mutable formula : formula option = None
     let updated = Event<_>()
@@ -328,7 +331,7 @@ and Cell (sheet:Sheet) as cell =
     let valueAt address = (cellAt address).UnitValue
     let eval formula =         
         try let v = evaluate valueAt formula in v, v.ToString()
-        with _ -> UnitValue(0.0M,Unit("",0)), "N/A"
+        with _ -> UnitValue(0.0M), "N/A"
     let parseFormula (text:string) =
         if text.StartsWith "="
         then                
@@ -366,11 +369,11 @@ and Cell (sheet:Sheet) as cell =
             let newValue =
                 match isFormula, formula with           
                 | _, Some f -> eval f
-                | true, _ -> UnitValue(0.0M,Unit.Empty), "N/A"                 
+                | true, _ -> UnitValue(0.0M), "N/A"                 
                 | _, None -> 
                     match (try tokenize text with _ -> []) with
                     | Number (Num u,[]) -> u, u.ToString()
-                    | _ -> UnitValue(0.0M,Unit.Empty), text
+                    | _ -> UnitValue(0.0M), text
             update newValue 0
     member cell.Value = value
     member cell.UnitValue = unitValue
