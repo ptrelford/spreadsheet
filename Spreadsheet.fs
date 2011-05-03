@@ -40,7 +40,7 @@ type UnitType =
                     let ns = ns |> List.map UnitType.Reciprocal
                     join ps + " / " + join ns
         match this with
-        | Unit(_,n) when n < 0 -> " / " + toString this
+        | Unit(_,n) when n < 0 -> " / " + (this |> UnitType.Reciprocal |> toString)
         | _ -> toString this    
     static member ( * ) (v:ValueType,u:UnitType) = UnitValue(v,u)    
     static member ( * ) (lhs:UnitType,rhs:UnitType) =       
@@ -109,6 +109,10 @@ and UnitValue (v:ValueType,u:UnitType) =
         UnitValue(v.Value,v.Unit/u)
     static member Pow (lhs:UnitValue,rhs:UnitValue) =
         let isInt x = 0.0M = x - (x |> int |> decimal)
+        let areAllInts =
+            List.forall (function (Unit(_,p)) -> isInt (decimal p*rhs.Value) | _ -> false)      
+        let toInts =            
+            List.map (function (Unit(s,p)) -> Unit(s, int (decimal p * rhs.Value)) | _ -> invalidOp "" )
         match lhs.Unit, rhs.Unit with
         | Empty, Empty -> 
             let x = (float lhs.Value) ** (float rhs.Value)           
@@ -118,9 +122,9 @@ and UnitValue (v:ValueType,u:UnitType) =
         | Unit(s,p1), Empty when isInt (decimal p1*rhs.Value) ->
             let x = (float lhs.Value) ** (float rhs.Value)
             UnitValue(x |> decimal, Unit(s,int (decimal p1*rhs.Value)))       
-        | CompositeUnit us, Empty when us |> List.forall (function (Unit(_,p)) -> isInt (decimal p*rhs.Value) | _ -> false) -> 
+        | CompositeUnit us, Empty when areAllInts us -> 
             let x = (float lhs.Value) ** (float rhs.Value)
-            UnitValue(x |> decimal, CompositeUnit(us |> List.map (function (Unit(s,p)) -> Unit(s, int (decimal p * rhs.Value)) | _ -> invalidOp "" )))
+            UnitValue(x |> decimal, CompositeUnit(toInts us))
         | _ -> invalidOp "Unit mismatch"
     static member One = UnitValue(1.0M,Empty) 
     override this.Equals(that) =
@@ -222,7 +226,7 @@ and (|Atom|_|) = function
         Some(Range(min x1 x2,min y1 y2,max x1 x2,max y1 y2),t)  
     | RefToken(x,y)::t -> Some(Ref(x,y), t)
     | Symbol '('::Term(f, Symbol ')'::t) -> Some(f, t)
-    | StrToken s::Tuple(ps, t) -> Some(Fun(s,ps),t)  
+    | StrToken s::Tuple(ps, t) -> Some(Fun(s,ps),t) 
     | Number(n,t) -> Some(n,t)
     | Units(u,t) -> Some(Num u,t)  
     | _ -> None
@@ -242,7 +246,9 @@ and (|Int|_|) s =
     match Int32.TryParse(s) with
     | true, n -> Some n
     | false,_ -> None
-and (|Unit'|_|) = function    
+and (|Unit'|_|) = function  
+    | StrToken u::OpToken "^"::OpToken "-"::NumToken(Int p)::t -> 
+        Some(UnitValue(1.0M,UnitType.Create(u,-p)),t)  
     | StrToken u::OpToken "^"::NumToken(Int p)::t -> 
         Some(UnitValue(1.0M,UnitType.Create(u,p)),t)
     | StrToken u::t ->
