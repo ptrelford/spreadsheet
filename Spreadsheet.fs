@@ -146,6 +146,7 @@ type token =
     | OpToken of string
     | RefToken of int * int
     | StrToken of string
+    | LiteralToken of string
     | BoolToken of bool
     | NumToken of string
 
@@ -165,6 +166,7 @@ let matchToken = function
     | Match @"^\(|^\)|^\,|^\:" s -> s, Symbol s.[0]   
     | Match @"^[A-Z]\d+" s -> s, s |> toRef |> RefToken
     | Match @"^(TRUE|FALSE)" s -> s, s |> bool.Parse |> BoolToken
+    | Match "^\"([^\"]*)\"" s -> s, LiteralToken (s.Trim('\"'))
     | Match @"^[A-Za-z]+" s -> s, StrToken s
     | Match @"^\d+(\.\d+)?|\.\d+" s -> s, s |> NumToken
     | _ -> invalidOp ""
@@ -182,11 +184,13 @@ let tokenize s =
 type value =
     | Num of UnitValue
     | Bool of bool
+    | String of string
     override value.ToString() =
         match value with
         | Num n -> n.ToString()
         | Bool true -> "TRUE"
         | Bool false -> "FALSE"
+        | String s -> s
 type arithmeticOp = Add | Sub | Mul | Div
 type logicalOp = Eq | Lt | Gt | Le | Ge | Ne
 type formula =
@@ -236,7 +240,8 @@ and (|Atom|_|) = function
         Some(Range(min x1 x2,min y1 y2,max x1 x2,max y1 y2),t)  
     | RefToken(x,y)::t -> Some(Ref(x,y), t)
     | Symbol '('::Term(f, Symbol ')'::t) -> Some(f, t)
-    | StrToken s::Tuple(ps, t) -> Some(Fun(s,ps),t) 
+    | StrToken s::Tuple(ps, t) -> Some(Fun(s,ps),t)
+    | LiteralToken s::t -> Some(Value(String(s)),t) 
     | BoolToken b::t -> Some(Value(Bool(b)),t)
     | Number(n,t) -> Some(n,t)
     | Units(u,t) -> Some(Value(Num(u)),t)  
@@ -285,6 +290,7 @@ let toNum = function
     | Num(n) -> n
     | Bool(true) -> UnitValue(1.0M)
     | Bool(false) -> UnitValue(0.0M)
+    | String(s) -> invalidOp "#VALUE!"
 
 let evaluate valueAt formula =
     let rec eval = function
@@ -298,10 +304,15 @@ let evaluate valueAt formula =
         | Fun("SQRT",[x]) -> Num(toNum(eval x) ** UnitValue(0.5M))
         | Fun("SUM",ps) -> Num(ps |> evalAll |> List.map toNum |> List.reduce (+))
         | Fun("IF",[condition;f1;f2]) -> 
+            let is a b = 0 = String.Compare(a,b,StringComparison.CurrentCultureIgnoreCase)
             match eval condition with
             | Bool(false) -> eval f2
+            | Bool(true) -> eval f1
+            | String(s) when is "FALSE" s -> eval f2
+            | String(s) when is "TRUE" s -> eval f1
+            | String(_) -> invalidOp "Expecting boolean value"
             | Num(v) when v.Value = 0.0M -> eval f2
-            | _ -> eval f1
+            | Num(_) -> eval f1
         | Fun(_,_) -> failwith "Unknown function"        
     and arithmetic = function
         | Add -> (+) | Sub -> (-) | Mul -> (*) | Div -> (/)
