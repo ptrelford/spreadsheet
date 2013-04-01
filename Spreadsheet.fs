@@ -146,6 +146,7 @@ type token =
     | OpToken of string
     | RefToken of int * int
     | StrToken of string
+    | BoolToken of bool
     | NumToken of string
 
 let (|Match|_|) pattern input =
@@ -163,6 +164,7 @@ let matchToken = function
     | Match @"^=|^<>|^<=|^>=|^>|^<"  s -> s, OpToken s   
     | Match @"^\(|^\)|^\,|^\:" s -> s, Symbol s.[0]   
     | Match @"^[A-Z]\d+" s -> s, s |> toRef |> RefToken
+    | Match @"^(TRUE|FALSE)" s -> s, s |> bool.Parse |> BoolToken
     | Match @"^[A-Za-z]+" s -> s, StrToken s
     | Match @"^\d+(\.\d+)?|\.\d+" s -> s, s |> NumToken
     | _ -> invalidOp ""
@@ -177,6 +179,14 @@ let tokenize s =
     tokenize' 0 s
     |> List.choose (function WhiteSpace -> None | t -> Some t)
 
+type value =
+    | Num of UnitValue
+    | Bool of bool
+    override value.ToString() =
+        match value with
+        | Num n -> n.ToString()
+        | Bool true -> "TRUE"
+        | Bool false -> "FALSE"
 type arithmeticOp = Add | Sub | Mul | Div
 type logicalOp = Eq | Lt | Gt | Le | Ge | Ne
 type formula =
@@ -184,7 +194,7 @@ type formula =
     | Exp of formula * formula
     | ArithmeticOp of formula * arithmeticOp * formula
     | LogicalOp of formula * logicalOp * formula
-    | Num of UnitValue
+    | Value of value
     | Ref of int * int
     | Range of int * int * int * int
     | Fun of string * formula list
@@ -227,12 +237,13 @@ and (|Atom|_|) = function
     | RefToken(x,y)::t -> Some(Ref(x,y), t)
     | Symbol '('::Term(f, Symbol ')'::t) -> Some(f, t)
     | StrToken s::Tuple(ps, t) -> Some(Fun(s,ps),t) 
+    | BoolToken b::t -> Some(Value(Bool(b)),t)
     | Number(n,t) -> Some(n,t)
-    | Units(u,t) -> Some(Num u,t)  
+    | Units(u,t) -> Some(Value(Num(u)),t)  
     | _ -> None
 and (|Number|_|) = function
-    | NumToken n::Units(u,t) -> Some(Num(u * decimal n),t)
-    | NumToken n::t -> Some(Num(UnitValue(decimal n)), t)      
+    | NumToken n::Units(u,t) -> Some(Value(Num(u * decimal n)),t)
+    | NumToken n::t -> Some(Value(Num(UnitValue(decimal n))), t)      
     | _ -> None
 and (|Units|_|) = function
     | Unit'(u,t) ->
@@ -270,22 +281,27 @@ let parse s =
     | Term(f,[]) -> f 
     | _ -> failwith "Failed to parse formula"
 
+let toNum = function
+    | Num(n) -> n
+    | Bool(true) -> UnitValue(1.0M)
+    | Bool(false) -> UnitValue(0.0M)
+
 let evaluate valueAt formula =
     let rec eval = function
-        | Neg f -> - (eval f)
-        | Exp(b,e) -> (eval b) ** (eval e)
-        | ArithmeticOp(f1,op,f2) -> arithmetic op (eval f1) (eval f2)
-        | LogicalOp(f1,op,f2) -> 
-            if logic op (eval f1) (eval f2) 
-            then UnitValue(0.0M) 
-            else UnitValue(-1.0M)
-        | Num d -> d
+        | Neg f -> Num(-toNum(eval f))
+        | Exp(b,e) -> Num(toNum(eval b) ** toNum(eval e))
+        | ArithmeticOp(f1,op,f2) -> Num(arithmetic op (toNum(eval f1)) (toNum(eval f2)))
+        | LogicalOp(f1,op,f2) -> Bool(logic op (eval f1) (eval f2))        
+        | Value(v) -> v
         | Ref(x,y) -> valueAt(x,y)
         | Range _ -> invalidOp "Range expected in function"
-        | Fun("SQRT",[x]) -> eval x ** UnitValue(0.5M)
-        | Fun("SUM",ps) -> ps |> evalAll |> List.reduce (+)
+        | Fun("SQRT",[x]) -> Num(toNum(eval x) ** UnitValue(0.5M))
+        | Fun("SUM",ps) -> Num(ps |> evalAll |> List.map toNum |> List.reduce (+))
         | Fun("IF",[condition;f1;f2]) -> 
-            if (eval condition).Value=0.0M then eval f1 else eval f2 
+            match eval condition with
+            | Bool(false) -> eval f2
+            | Num(v) when v.Value = 0.0M -> eval f2
+            | _ -> eval f1
         | Fun(_,_) -> failwith "Unknown function"        
     and arithmetic = function
         | Add -> (+) | Sub -> (-) | Mul -> (*) | Div -> (/)
@@ -325,7 +341,7 @@ and Row (index,colCount,sheet) =
 and Cell (sheet:Sheet) as cell =
     inherit ObservableObject()
     let mutable value = ""
-    let mutable unitValue = UnitValue(0.0M)
+    let mutable unitValue = Num(UnitValue(0.0M))
     let mutable data = ""       
     let mutable formula : formula option = None
     let updated = Event<_>()
@@ -337,12 +353,12 @@ and Cell (sheet:Sheet) as cell =
     let valueAt address = (cellAt address).UnitValue
     let eval formula =         
         try let v = evaluate valueAt formula in v, v.ToString()
-        with _ -> UnitValue(0.0M), "N/A"
+        with _ -> Num(UnitValue(0.0M)), "N/A"
     let parseFormula (text:string) =
         if text.StartsWith "="
         then                
             try true, parse (text.Substring 1) |> Some
-            with _ -> true, None
+            with e -> true, None
         else false, None
     let update (newUnitValue, newValue) generation =
         if newValue <> value || newUnitValue <> unitValue then
@@ -375,11 +391,11 @@ and Cell (sheet:Sheet) as cell =
             let newValue =
                 match isFormula, formula with           
                 | _, Some f -> eval f
-                | true, _ -> UnitValue(0.0M), "N/A"                 
+                | true, _ -> Num(UnitValue(0.0M)), "N/A"                 
                 | _, None -> 
                     match (try tokenize text with _ -> []) with
-                    | Number (Num u,[]) -> u, u.ToString()
-                    | _ -> UnitValue(0.0M), text
+                    | Number (Value(v),[]) -> v, v.ToString()
+                    | _ -> Num(UnitValue(0.0M)), text
             update newValue 0
     member cell.Value = value
     member cell.UnitValue = unitValue
