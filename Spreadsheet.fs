@@ -185,12 +185,14 @@ type value =
     | Num of UnitValue
     | Bool of bool
     | String of string
+    | DateTime of DateTime
     override value.ToString() =
         match value with
         | Num n -> n.ToString()
         | Bool true -> "TRUE"
         | Bool false -> "FALSE"
         | String s -> s
+        | DateTime d -> d.ToString()
 type arithmeticOp = Add | Sub | Mul | Div
 type logicalOp = Eq | Lt | Gt | Le | Ge | Ne
 type formula =
@@ -286,11 +288,39 @@ let parse s =
     | Term(f,[]) -> f 
     | _ -> failwith "Failed to parse formula"
 
-let toNum = function
+let rec toNum = function
     | Num(n) -> n
     | Bool(true) -> UnitValue(1.0M)
     | Bool(false) -> UnitValue(0.0M)
-    | String(s) -> invalidOp "#VALUE!"
+    | String(Decimal n) -> UnitValue(decimal n)
+    | String(_) | DateTime(_) -> invalidOp "#VALUE!"
+and (|Decimal|_|) s =
+    match Decimal.TryParse s with
+    | true, n -> Some n
+    | false, _ -> None
+
+let toBool value =
+    let is a b = 0 = String.Compare(a,b,StringComparison.CurrentCultureIgnoreCase)
+    match value with
+    | Bool(b) -> b
+    | String(s) when is "FALSE" s -> false
+    | String(s) when is "TRUE" s -> true
+    | String(_) -> invalidOp "Expecting boolean value"
+    | Num(v) when v.Value = 0.0M -> false
+    | Num(_) | DateTime(_) -> true
+
+let rec toDateTime = function
+    | DateTime(dt) -> dt
+    | String(DateTimeText dt) -> dt
+    | _ -> invalidOp "Expecting datetime value"
+and (|DateTimeText|_|) s =
+    match DateTime.TryParse s with
+    | true, dt -> Some dt
+    | false, _ -> None    
+    
+let year (d:DateTime) = d.Year
+let month (d:DateTime) = d.Month
+let day (d:DateTime) = d.Day
 
 let evaluate valueAt formula =
     let rec eval = function
@@ -301,18 +331,13 @@ let evaluate valueAt formula =
         | Value(v) -> v
         | Ref(x,y) -> valueAt(x,y)
         | Range _ -> invalidOp "Range expected in function"
+        | Fun("NOW",[]) | Fun("TODAY",[]) -> DateTime(DateTime.Now)
+        | Fun("YEAR",[x]) -> Num(UnitValue(eval x |> toDateTime |> year |> decimal))
+        | Fun("MONTH",[x]) -> Num(UnitValue(eval x |> toDateTime |> month |> decimal))
+        | Fun("DAY",[x]) -> Num(UnitValue(eval x |> toDateTime |> day |> decimal))
         | Fun("SQRT",[x]) -> Num(toNum(eval x) ** UnitValue(0.5M))
         | Fun("SUM",ps) -> Num(ps |> evalAll |> List.map toNum |> List.reduce (+))
-        | Fun("IF",[condition;f1;f2]) -> 
-            let is a b = 0 = String.Compare(a,b,StringComparison.CurrentCultureIgnoreCase)
-            match eval condition with
-            | Bool(false) -> eval f2
-            | Bool(true) -> eval f1
-            | String(s) when is "FALSE" s -> eval f2
-            | String(s) when is "TRUE" s -> eval f1
-            | String(_) -> invalidOp "Expecting boolean value"
-            | Num(v) when v.Value = 0.0M -> eval f2
-            | Num(_) -> eval f1
+        | Fun("IF",[condition;f1;f2]) -> if eval condition |> toBool then eval f1 else eval f2
         | Fun(_,_) -> failwith "Unknown function"        
     and arithmetic = function
         | Add -> (+) | Sub -> (-) | Mul -> (*) | Div -> (/)
